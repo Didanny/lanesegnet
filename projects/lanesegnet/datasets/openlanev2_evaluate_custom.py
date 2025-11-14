@@ -6,15 +6,15 @@
 
 import numpy as np
 from tqdm import tqdm
-from openlanev2.lanesegment.io import io
-from openlanev2.lanesegment.evaluation.distance import (pairwise, area_distance,
-                                                        lane_segment_distance, lane_segment_distance_c)
-from openlanev2.lanesegment.evaluation.evaluate import (THRESHOLDS_LANESEG, THRESHOLDS_AREA,
-                                                        _mAP_over_threshold, _mAP_topology_lsls)
-
+# Lazy imports moved inside lanesegnet_evaluate function to avoid ortools segfault
 
 def lanesegnet_evaluate(ground_truth, predictions, verbose=True):
 
+    from openlanev2.lanesegment.io import io
+    from openlanev2.lanesegment.evaluation.distance import (pairwise, area_distance,
+                                                            lane_segment_distance, lane_segment_distance_c)
+    from openlanev2.lanesegment.evaluation.evaluate import (THRESHOLDS_LANESEG, THRESHOLDS_AREA,
+                                                            _mAP_over_threshold, _mAP_topology_lsls)
     if isinstance(ground_truth, str):
         ground_truth = io.pickle_load(ground_truth)
 

@@ -20,7 +20,7 @@ from mmcv.parallel import DataContainer as DC
 from mmdet.datasets import DATASETS
 from mmdet3d.datasets import Custom3DDataset
 
-from .openlanev2_evaluate_custom import lanesegnet_evaluate
+# from .openlanev2_evaluate_custom import lanesegnet_evaluate
 from ..core.lane.util import fix_pts_interpolate
 from ..core.visualizer.lane_segment import draw_annotation_bev
 
@@ -437,6 +437,7 @@ class OpenLaneV2_subset_A_LaneSegNet_Dataset(Custom3DDataset):
         pred_dict = self.format_results(results)
 
         logger.info(f'Starting openlanev2 evaluate...')
+        from .openlanev2_evaluate_custom import lanesegnet_evaluate
         metric_results = lanesegnet_evaluate(gt_dict, pred_dict)
         return metric_results
 

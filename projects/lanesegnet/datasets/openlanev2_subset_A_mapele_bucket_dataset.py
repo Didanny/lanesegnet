@@ -18,7 +18,7 @@ import shapely
 from shapely.geometry import LineString
 from mmdet.datasets import DATASETS
 
-from openlanev2.lanesegment.evaluation import evaluate as openlanev2_evaluate
+# Lazy import moved inside evaluate method to avoid ortools segfault
 from .openlanev2_subset_A_lanesegnet_dataset import OpenLaneV2_subset_A_LaneSegNet_Dataset
 from ..core.lane.util import fix_pts_interpolate
 from ..core.visualizer.lane_segment import draw_annotation_bev
@@ -229,6 +229,7 @@ class OpenLaneV2_subset_A_MapElementBucket_Dataset(OpenLaneV2_subset_A_LaneSegNe
         pred_dict = self.format_results(results, logger=logger)
 
         logger.info(f'Starting openlanev2 evaluate...')
+        from openlanev2.lanesegment.evaluation import evaluate as openlanev2_evaluate
         metric_results = openlanev2_evaluate(gt_dict, pred_dict)['OpenLane-V2 UniScore']
         return metric_results
 

@@ -134,3 +134,4 @@ ckpts
 data
 work_dirs
 .vscode
+slurm_logs/

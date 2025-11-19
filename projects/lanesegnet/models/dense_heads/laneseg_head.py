@@ -40,6 +40,7 @@ class LaneSegHead(AnchorFreeHead):
                  bev_w=30,
                  pc_range=None,
                  pts_dim=3,
+                 num_points=10,
                  sync_cls_avg_factor=False,
                  num_lane_type_classes=3,
                  loss_cls=dict(
@@ -123,6 +124,8 @@ class LaneSegHead(AnchorFreeHead):
 
         assert pts_dim in (2, 3)
         self.pts_dim = pts_dim
+        
+        self.num_points = num_points
 
         self.with_box_refine = with_box_refine
         if with_shared_param is not None:
@@ -173,11 +176,26 @@ class LaneSegHead(AnchorFreeHead):
             reg_branch_offset.append(nn.ReLU())
         reg_branch_offset.append(Linear(self.embed_dims, self.code_size // 3))
         reg_branch_offset = nn.Sequential(*reg_branch_offset)
+        
+        geometric_pointwise_projection_branch = []
+        geometric_pointwise_projection_branch.append(Linear(self.pts_dim, self.embed_dims // 2))
+        geometric_pointwise_projection_branch.append(nn.ReLU())
+        geometric_pointwise_projection_branch.append(Linear(self.embed_dims // 2, self.embed_dims))
+        geometric_pointwise_projection = nn.Sequential(*geometric_pointwise_projection_branch)
+        
+        geometric_global_projection_branch = []
+        geometric_global_projection_branch.append(Linear(self.num_points * self.embed_dims, self.embed_dims))
+        geometric_global_projection_branch.append(nn.ReLU())
+        geometric_global_projection_branch.append(Linear(self.embed_dims, self.embed_dims // 2))
+        geometric_global_projection = nn.Sequential(*geometric_global_projection_branch)
 
         def _get_clones(module, N):
             return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-        self.query_embedding = nn.Embedding(self.num_query, self.embed_dims * 2)
+        # Add specialized embeddings for content and geometry queries
+        self.positional_query_embedding = nn.Embedding(self.num_query, self.embed_dims)
+        self.content_query_embedding = nn.Embedding(self.num_query, self.embed_dims // 2)
+        self.geometry_query_embedding = nn.Embedding(self.num_query, self.num_points * self.pts_dim)
 
         cls_left_type_branch = []
         for _ in range(self.num_reg_fcs):
@@ -207,6 +225,8 @@ class LaneSegHead(AnchorFreeHead):
             self.cls_branches = _get_clones(fc_cls, num_pred)
             self.reg_branches = _get_clones(reg_branch, num_pred)
             self.reg_branches_offset = _get_clones(reg_branch_offset, num_pred)
+            self.geometric_pointwise_projection_branches = _get_clones(geometric_pointwise_projection, num_pred)
+            self.geometric_global_projection_branches = _get_clones(geometric_global_projection, num_pred)
             self.cls_left_type_branches = _get_clones(fc_cls_left_type, num_pred)
             self.cls_right_type_branches = _get_clones(fc_cls_right_type, num_pred)
             self.mask_embed = _get_clones(mask_branch, num_pred)
@@ -217,6 +237,10 @@ class LaneSegHead(AnchorFreeHead):
                 [reg_branch for _ in range(num_pred)])
             self.reg_branches_offset = nn.ModuleList(
                 [reg_branch_offset for _ in range(num_pred)])
+            self.geometric_pointwise_projection_branches = nn.ModuleList(
+                [geometric_pointwise_projection for _ in range(num_pred)])
+            self.geometric_global_projection_branches = nn.ModuleList(
+                [geometric_global_projection for _ in range(num_pred)])
             self.cls_left_type_branches = nn.ModuleList(
                 [fc_cls_left_type for _ in range(num_pred)])
             self.cls_right_type_branches = nn.ModuleList(
@@ -253,21 +277,37 @@ class LaneSegHead(AnchorFreeHead):
                 Shape []
         """
         dtype = mlvl_feats[0].dtype
-        object_query_embeds = self.query_embedding.weight.to(dtype)
+        
+        # Initialize positional queries (randomly initialized)
+        positional_queries = self.positional_query_embedding.weight # [num_query, embed_dims]
+        
+        # Initialize content queries (randomly initialized)
+        content_queries = self.content_query_embedding.weight  # [num_query, embed_dims // 2]
+        
+        # Initialize geometry queries (polyline guess)
+        geometry_queries = self.geometry_query_embedding.weight  # [num_query, num_points * point_dim]
+        geometry_queries = geometry_queries.view(self.num_query, -1, self.pts_dim) # [num_query, num_points, point_dim]
+        
         outputs = self.transformer(
             mlvl_feats,
             bev_feats,
-            object_query_embeds,
+            positional_queries,  # Will be projected into the refernce points
+            content_queries,     # First half of the decoder query
+            geometry_queries,    # Will be projected into second half of decoder query
             bev_h=self.bev_h,
             bev_w=self.bev_w,
-            reg_branches=(self.reg_branches, self.reg_branches_offset) if self.with_box_refine else None,  # noqa:E501
+            reg_branches=(self.reg_branches, self.reg_branches_offset),  # noqa:E501
+            geo_pointwise_branches=self.geometric_pointwise_projection_branches,
+            geo_global_branches=self.geometric_global_projection_branches,
             cls_branches=None,
             img_metas=img_metas
         )
         
-        hs, init_reference, inter_references = outputs
-        hs = hs.permute(0, 2, 1, 3)
-
+        hs_content, hs_geo, hs_coords, init_reference, inter_references = outputs
+        hs = torch.cat([hs_content, hs_geo], dim=-1)
+        hs_content_duplicated = torch.cat([hs_content, hs_content], dim=-1) # duplicate content embeddings to keep cls branch unchanged
+        hs_geo_duplicated = torch.cat([hs_geo, hs_geo], dim=-1) # duplicate geo embeddings to keep offset reg branch unchanged
+        
         if not self.training:
             reference = inter_references[-1]
             reference = inverse_sigmoid(reference)
@@ -309,7 +349,9 @@ class LaneSegHead(AnchorFreeHead):
                 'all_mask_preds': torch.stack([outputs_mask]) if self.pred_mask else None,
                 'all_lanes_left_type': output_left_types,
                 'all_lanes_right_type': output_right_types,
-                'history_states': hs
+                'history_states': hs,
+                'content_states': hs_content_duplicated,
+                'geometry_states': hs_geo_duplicated,
             }
 
             return outs
@@ -319,32 +361,25 @@ class LaneSegHead(AnchorFreeHead):
         outputs_masks = []
         output_left_types = []
         output_right_types = []
-        for lvl in range(hs.shape[0]):
-            if lvl == 0:
-                reference = init_reference
-            else:
-                reference = inter_references[lvl - 1]
-            reference = inverse_sigmoid(reference)
-            assert reference.shape[-1] == self.pts_dim
+        for lvl in range(hs_content.shape[0]):
+            # Use coordinates computed in decoder (DAB-DETR style)
+            inter_coord = hs_coords[lvl]
 
-            outputs_class = self.cls_branches[lvl](hs[lvl])
-            output_left_type = self.cls_left_type_branches[lvl](hs[lvl])
-            output_right_type = self.cls_right_type_branches[lvl](hs[lvl])
+            # Classification output
+            outputs_class = self.cls_branches[lvl](hs_content_duplicated[lvl])
+            output_left_type = self.cls_left_type_branches[lvl](hs_content_duplicated[lvl])
+            output_right_type = self.cls_right_type_branches[lvl](hs_content_duplicated[lvl])
 
-            tmp = self.reg_branches[lvl](hs[lvl])
-            bs, num_query, _ = tmp.shape
-            tmp = tmp.view(bs, num_query, -1, self.pts_dim)
-            tmp = tmp + reference
-            tmp = tmp.sigmoid()
-
-            coord = tmp.clone()
+            # Denormalize polyline coordinates
+            bs, num_query, _, _ = inter_coord.shape
+            coord = inter_coord.clone()
             coord[..., 0] = coord[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
             coord[..., 1] = coord[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
             if self.pts_dim == 3:
                 coord[..., 2] = coord[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
             centerline = coord.view(bs, num_query, -1).contiguous()
 
-            offset = self.reg_branches_offset[lvl](hs[lvl])
+            offset = self.reg_branches_offset[lvl](hs_geo_duplicated[lvl])
             left_laneline = centerline + offset
             right_laneline = centerline - offset
 
@@ -369,7 +404,9 @@ class LaneSegHead(AnchorFreeHead):
             'all_mask_preds': outputs_masks,
             'all_lanes_left_type': output_left_types,
             'all_lanes_right_type': output_right_types,
-            'history_states': hs
+            'history_states': hs,
+            'content_states': hs_content_duplicated,
+            'geometry_states': hs_geo_duplicated,
         }
 
         return outs

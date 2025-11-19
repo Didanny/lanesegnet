@@ -161,7 +161,9 @@ class LaneSegNet(MVXTwoStageDetector):
         lane_losses, lane_assign_result = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
         for loss in lane_losses:
             losses['lane_head.' + loss] = lane_losses[loss]
-        lane_feats = outs['history_states']
+        
+        # Only input the content features to LCLC head
+        lane_feats = outs['content_states']
 
         if self.lclc_head is not None:
             lclc_losses = self.lclc_head.forward_train(lane_feats, lane_assign_result, lane_feats, lane_assign_result, gt_lane_adj)

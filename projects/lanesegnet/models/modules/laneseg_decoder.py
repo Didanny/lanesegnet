@@ -28,72 +28,132 @@ class LaneSegNetDecoder(TransformerLayerSequence):
         self.pts_dim = pts_dim
 
     def forward(self,
-                query,
+                content_queries,
                 *args,
+                query_pos=None,
+                geometry_queries=None,
                 reference_points=None,
                 reg_branches=None,
+                geo_pointwise_branches=None,
+                geo_global_branches=None,
                 key_padding_mask=None,
                 **kwargs):
-
-        output = query
-        intermediate = []
+        
+        # Initialize the current geometry guess from the input geometry_queries
+        # geometry_queries: [num_query, bs, points_num, pts_dim] -> [num_query, bs, points_num*pts_dim]
+        bs = content_queries.size(1)
+        num_query = content_queries.size(0)
+        embed_dims = content_queries.size(2) * 2
+        
+        # output = content_queries # [num_query, bs, embed_dims//2]
+        intermediate_content = []
+        intermediate_geometry = []
         intermediate_reference_points = []
+        intermediate_coords = []
         lane_ref_points = reference_points[:, :, self.sample_idx * 2, :]
+        
+        # Init content_embeddings
+        content_embeddings = content_queries # [num_query, bs, embed_dims//2]
+        
         for lid, layer in enumerate(self.layers):
+            # Project the geometry queries
+            pointwise_embeddings = geo_pointwise_branches[lid](geometry_queries) # [num_query, bs, points_num, embed_dims]
+            pointwise_embeddings = pointwise_embeddings.view(num_query, bs, -1) # [num_query, bs, points_num*embed_dims]
+            geometry_embeddings = geo_global_branches[lid](pointwise_embeddings) # [num_query, bs, embed_dims//2]
+            
+            # Combine all queries: [content, geometry] -> [embed_dims]
+            output = torch.cat([content_embeddings, geometry_embeddings], dim=-1)  # [num_query, bs, embed_dims]
+            
             # BS NUM_QUERY NUM_LEVEL NUM_REFPTS 3
             reference_points_input = lane_ref_points[..., :2].unsqueeze(2)
+            
+            # Pass combined query through the transformer layer
             output = layer(
                 output,
                 *args,
                 reference_points=reference_points_input,
                 key_padding_mask=key_padding_mask,
                 **kwargs)
-            output = output.permute(1, 0, 2)
+            
+            # Batch-first dimension again
+            output = output.permute(1, 0, 2) # [bs, num_query, embed_dims]
 
             if reg_branches is not None:
+                # Split the query into content and geometry again
+                content_embeddings, geometry_embeddings = torch.split(
+                    output, embed_dims // 2, dim=-1) # [bs, num_query, embed_dims//2], [bs, num_query, embed_dims//2]
+                
+                # Duplicating input to keep branches exactly the same as baselines
+                # AND to decouple geometry and content completely
+                content_duplicated = torch.cat([content_embeddings, content_embeddings], dim=-1)
+                geometry_duplicated = torch.cat([geometry_embeddings, geometry_embeddings], dim=-1)
+                
                 reg_center = reg_branches[0]
                 reg_offset = reg_branches[1]
 
-                tmp = reg_center[lid](output)
-                bs, num_query, _ = tmp.shape
-                tmp = tmp.view(bs, num_query, -1, self.pts_dim)
-
+                # Project layer output to coordinate space to get residuals
+                coord_residuals = reg_center[lid](geometry_duplicated) # [bs, num_query, points_num*pts_dim]
+                bs, num_query, _ = coord_residuals.shape
+                coord_residuals = coord_residuals.view(bs, num_query, -1, self.pts_dim) # [bs, num_query, points_num, pts_dim]
+                
+                # Apply residuals to the current geometry guess
+                geometry_queries = geometry_queries.permute(1, 0, 2, 3) # [bs, num_query, points_num, pts_dim]
+                geometry_queries = geometry_queries + coord_residuals
+                
+                # Add the referenced points to the geometry
                 assert reference_points.shape[-1] == self.pts_dim
+                geometry_queries = geometry_queries + inverse_sigmoid(reference_points)
+                geometry_queries = geometry_queries.sigmoid()
+                
+                # Detach everything that will be used again in the next layer
+                reference_points = geometry_queries.detach()
 
-                tmp = tmp + inverse_sigmoid(reference_points)
-                tmp = tmp.sigmoid()
-                reference_points = tmp.detach()
-
-                coord = tmp.clone()
+                # Denormalize polyline coordinates for offset addition
+                coord = geometry_queries.clone()
                 coord[..., 0] = coord[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
                 coord[..., 1] = coord[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
                 if self.pts_dim == 3:
                     coord[..., 2] = coord[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
                 centerline = coord.view(bs, num_query, -1).contiguous()
 
-                offset = reg_offset[lid](output)
+                # Calculate left and right lane lines from centerline + offset
+                offset = reg_offset[lid](geometry_duplicated)
                 left_laneline = centerline + offset
                 right_laneline = centerline - offset
+                
+                # Sample new reference points from the lane lines
                 left_laneline = left_laneline.view(bs, num_query, -1, self.pts_dim)[:, :, self.sample_idx, :]
                 right_laneline = right_laneline.view(bs, num_query, -1, self.pts_dim)[:, :, self.sample_idx, :]
 
                 lane_ref_points = torch.cat([left_laneline, right_laneline], axis=-2).contiguous().detach()
 
+                # Normalize lane reference points back to [0, 1] range (After properly adding offset)
                 lane_ref_points[..., 0] = (lane_ref_points[..., 0] - self.pc_range[0]) / (self.pc_range[3] - self.pc_range[0])
                 lane_ref_points[..., 1] = (lane_ref_points[..., 1] - self.pc_range[1]) / (self.pc_range[4] - self.pc_range[1])
                 if self.pts_dim == 3:
                     lane_ref_points[..., 2] = (lane_ref_points[..., 2] - self.pc_range[2]) / (self.pc_range[5] - self.pc_range[2])
 
-            output = output.permute(1, 0, 2)
             if self.return_intermediate:
-                intermediate.append(output)
+                intermediate_content.append(content_embeddings) # [bs, num_query, embed_dims//2]
+                intermediate_geometry.append(geometry_embeddings) # [bs, num_query, embed_dims//2]
+                intermediate_coords.append(geometry_queries) # [bs, num_query, points_num, pts_dim]
                 intermediate_reference_points.append(reference_points)
+                
+            # Set up the reused variables for the next layer
+            geometry_queries = inverse_sigmoid(geometry_queries)
+            geometry_queries = geometry_queries.permute(1, 0, 2, 3) # [num_query, bs, points_num, pts_dim]
+            content_embeddings = content_embeddings.permute(1, 0, 2) # [num_query, bs, embed_dims//2]
 
         if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(
-                intermediate_reference_points)
+            return (
+                torch.stack(intermediate_content),
+                torch.stack(intermediate_geometry),
+                torch.stack(intermediate_coords),
+                torch.stack(intermediate_reference_points),
+            )
 
-        return output, reference_points
+        # Return final output if no intermediate outputs are needed
+        return content_embeddings, geometry_embeddings, geometry_queries, reference_points
 
 
 @TRANSFORMER_LAYER.register_module()

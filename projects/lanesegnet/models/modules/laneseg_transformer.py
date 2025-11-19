@@ -13,6 +13,7 @@ from mmcv.runner import auto_fp16, force_fp32
 from mmcv.runner.base_module import BaseModule
 from mmdet.models.utils.builder import TRANSFORMER
 from .lane_attention import LaneAttention
+from mmdet.models.utils.transformer import inverse_sigmoid
 
 
 @TRANSFORMER.register_module()
@@ -49,19 +50,24 @@ class LaneSegNetTransformer(BaseModule):
     def forward(self,
                 mlvl_feats,
                 bev_embed,
-                object_query_embed,
+                positional_query,
+                content_query,
+                geometric_query,
                 bev_h,
                 bev_w,
                 reg_branches=None,
                 cls_branches=None,
+                geo_pointwise_branches=None,
+                geo_global_branches=None,
                 **kwargs):
 
         bs = mlvl_feats[0].size(0)
-        query_pos, query = torch.split(
-            object_query_embed, self.embed_dims, dim=1)
-        query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
-        query = query.unsqueeze(0).expand(bs, -1, -1)
-        reference_points = self.reference_points(query_pos)
+        
+        # Use the passed queries directly (they will be projected in the decoder)
+        query_pos = positional_query.unsqueeze(0).expand(bs, -1, -1)
+        content_queries = content_query.unsqueeze(0).expand(bs, -1, -1)
+        geometric_queries = geometric_query.unsqueeze(0).expand(bs, -1, -1, -1)
+        reference_points = self.reference_points(query_pos) # nn.Linear [bs, num_query, embed_dims] -> [bs, num_query, pts_dim]
 
         # ident init: repeat reference points to num points
         reference_points = reference_points.repeat(1, 1, self.points_num)
@@ -71,21 +77,28 @@ class LaneSegNetTransformer(BaseModule):
 
         init_reference_out = reference_points
 
-        query = query.permute(1, 0, 2)
-        query_pos = query_pos.permute(1, 0, 2)
-        bev_embed = bev_embed.permute(1, 0, 2)
-        inter_states, inter_references = self.decoder(
-            query=query,
+        # Switch num_query to the first dimension, batch to the second dimension
+        content_queries = content_queries.permute(1, 0, 2) # [num_query, bs, embed_dims]
+        query_pos = query_pos.permute(1, 0, 2) # [num_query, bs, embed_dims]
+        geometric_queries = geometric_queries.permute(1, 0, 2, 3) # [num_query, bs, points_num, pts_dim]
+        bev_embed = bev_embed.permute(1, 0, 2) # [bev_h*bev_w, bs, embed_dims]
+        
+        # self.decoder: LaneSegNetDecoder
+        inter_content, inter_geo, inter_coords, inter_references = self.decoder(
+            geometry_queries=geometric_queries,
+            content_queries=content_queries,
             key=None,
             value=bev_embed,
             query_pos=query_pos,
             reference_points=reference_points,
             reg_branches=reg_branches,
             cls_branches=cls_branches,
-            spatial_shapes=torch.tensor([[bev_h, bev_w]], device=query.device),
-            level_start_index=torch.tensor([0], device=query.device),
+            geo_pointwise_branches=geo_pointwise_branches,
+            geo_global_branches=geo_global_branches,
+            spatial_shapes=torch.tensor([[bev_h, bev_w]], device=content_queries.device),
+            level_start_index=torch.tensor([0], device=content_queries.device),
             **kwargs)
 
         inter_references_out = inter_references
 
-        return inter_states, init_reference_out, inter_references_out
+        return inter_content, inter_geo, inter_coords, init_reference_out, inter_references_out

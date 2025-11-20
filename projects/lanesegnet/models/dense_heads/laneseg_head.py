@@ -309,28 +309,24 @@ class LaneSegHead(AnchorFreeHead):
         hs_geo_duplicated = torch.cat([hs_geo, hs_geo], dim=-1) # duplicate geo embeddings to keep offset reg branch unchanged
         
         if not self.training:
-            reference = inter_references[-1]
-            reference = inverse_sigmoid(reference)
-            assert reference.shape[-1] == self.pts_dim
+            # Use coordinates computed in decoder (DAB-DETR style) - last layer only
+            inter_coord = hs_coords[-1]
 
-            outputs_class = self.cls_branches[-1](hs[-1])
-            output_left_type = self.cls_left_type_branches[-1](hs[-1])
-            output_right_type = self.cls_right_type_branches[-1](hs[-1])
+            # Classification output
+            outputs_class = self.cls_branches[-1](hs_content_duplicated[-1])
+            output_left_type = self.cls_left_type_branches[-1](hs_content_duplicated[-1])
+            output_right_type = self.cls_right_type_branches[-1](hs_content_duplicated[-1])
 
-            tmp = self.reg_branches[-1](hs[-1])
-            bs, num_query, _ = tmp.shape
-            tmp = tmp.view(bs, num_query, -1, self.pts_dim)
-            tmp = tmp + reference
-            tmp = tmp.sigmoid()
-
-            coord = tmp.clone()
+            # Denormalize polyline coordinates
+            bs, num_query, _, _ = inter_coord.shape
+            coord = inter_coord.clone()
             coord[..., 0] = coord[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
             coord[..., 1] = coord[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
             if self.pts_dim == 3:
                 coord[..., 2] = coord[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
             centerline = coord.view(bs, num_query, -1).contiguous()
 
-            offset = self.reg_branches_offset[-1](hs[-1])
+            offset = self.reg_branches_offset[-1](hs_geo_duplicated[-1])
             left_laneline = centerline + offset
             right_laneline = centerline - offset
 

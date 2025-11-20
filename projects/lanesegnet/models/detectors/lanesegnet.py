@@ -218,7 +218,7 @@ class LaneSegNet(MVXTwoStageDetector):
             outs, img_metas, rescale=rescale)
 
         if self.lclc_head is not None:
-            lane_feats = outs['history_states']
+            lane_feats = outs['content_states']
             lsls_results = self.lclc_head.get_relationship(lane_feats, lane_feats)
             lsls_results = [result.detach().cpu().numpy() for result in lsls_results]
         else:

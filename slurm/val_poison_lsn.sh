@@ -11,4 +11,3 @@ export PYTHONPATH=$(pwd):$PYTHONPATH
 ./tools/dist_test.sh 4 work_dirs/lanesegnet_251115.214225 epoch_4
 ./tools/dist_test.sh 4 work_dirs/lanesegnet_251115.214225 epoch_8
 ./tools/dist_test.sh 4 work_dirs/lanesegnet_251115.214225 epoch_12
-./tools/dist_test.sh 4 work_dirs/lanesegnet_251115.214225 latest

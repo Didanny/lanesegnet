@@ -177,16 +177,29 @@ class LaneSegHead(AnchorFreeHead):
         reg_branch_offset.append(Linear(self.embed_dims, self.code_size // 3))
         reg_branch_offset = nn.Sequential(*reg_branch_offset)
         
+        # Improved pointwise projection: deeper with normalization and better capacity
+        # Projects each 3D point independently but with more expressiveness
         geometric_pointwise_projection_branch = []
-        geometric_pointwise_projection_branch.append(Linear(self.pts_dim, self.embed_dims // 2))
-        geometric_pointwise_projection_branch.append(nn.ReLU())
-        geometric_pointwise_projection_branch.append(Linear(self.embed_dims // 2, self.embed_dims))
+        geometric_pointwise_projection_branch.append(Linear(self.pts_dim, self.embed_dims))
+        geometric_pointwise_projection_branch.append(nn.LayerNorm(self.embed_dims))
+        geometric_pointwise_projection_branch.append(nn.ReLU(inplace=True))
+        geometric_pointwise_projection_branch.append(Linear(self.embed_dims, self.embed_dims))
+        geometric_pointwise_projection_branch.append(nn.LayerNorm(self.embed_dims))
+        geometric_pointwise_projection_branch.append(nn.ReLU(inplace=True))
+        geometric_pointwise_projection_branch.append(Linear(self.embed_dims, self.embed_dims))
         geometric_pointwise_projection = nn.Sequential(*geometric_pointwise_projection_branch)
         
+        # Improved global projection: less aggressive bottleneck, more capacity
+        # Aggregates information from all points with better information preservation
         geometric_global_projection_branch = []
-        geometric_global_projection_branch.append(Linear(self.num_points * self.embed_dims, self.embed_dims))
-        geometric_global_projection_branch.append(nn.ReLU())
-        geometric_global_projection_branch.append(Linear(self.embed_dims, self.embed_dims // 2))
+        # First stage: compress to 2x embed_dims (less aggressive than 1x)
+        geometric_global_projection_branch.append(Linear(self.num_points * self.embed_dims, self.embed_dims * 2))
+        geometric_global_projection_branch.append(nn.LayerNorm(self.embed_dims * 2))
+        geometric_global_projection_branch.append(nn.ReLU(inplace=True))
+        geometric_global_projection_branch.append(nn.Dropout(0.1))  # Regularization
+        # Second stage: compress to final size
+        geometric_global_projection_branch.append(Linear(self.embed_dims * 2, self.embed_dims // 2))
+        geometric_global_projection_branch.append(nn.LayerNorm(self.embed_dims // 2))
         geometric_global_projection = nn.Sequential(*geometric_global_projection_branch)
 
         def _get_clones(module, N):

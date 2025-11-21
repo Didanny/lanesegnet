@@ -96,20 +96,33 @@ class LaneSegNetDecoder(TransformerLayerSequence):
                 bs, num_query, _ = coord_residuals.shape
                 coord_residuals = coord_residuals.view(bs, num_query, -1, self.pts_dim) # [bs, num_query, points_num, pts_dim]
                 
-                # Apply residuals to the current geometry guess
+                # Scale residuals to encourage refinement rather than large jumps
+                # Using tanh squashing: limits updates to reasonable range per iteration
+                coord_residuals = torch.tanh(coord_residuals) * 0.2  # Max ±0.2 update per layer
+                
+                # Convert geometry_queries from logit space to normalized coordinates
                 geometry_queries = geometry_queries.permute(1, 0, 2, 3) # [bs, num_query, points_num, pts_dim]
-                geometry_queries = geometry_queries + coord_residuals
+                current_coords = geometry_queries.sigmoid() # [bs, num_query, points_num, pts_dim] in [0, 1]
                 
-                # Add the referenced points to the geometry
-                assert reference_points.shape[-1] == self.pts_dim
-                geometry_queries = geometry_queries + inverse_sigmoid(reference_points)
-                geometry_queries = geometry_queries.sigmoid()
+                # Apply residuals directly in normalized coordinate space
+                # This is the single, clear update mechanism
+                new_coords = current_coords + coord_residuals
                 
-                # Detach everything that will be used again in the next layer
-                reference_points = geometry_queries.detach()
+                # Soft clamping: use sigmoid to smoothly bound coordinates
+                # This maintains gradients even for out-of-range predictions
+                new_coords_logit = inverse_sigmoid(new_coords.clamp(min=1e-6, max=1-1e-6))  # Prevent log(0)
+                new_coords_logit = new_coords_logit.clamp(min=-10, max=10)  # Prevent extreme logits
+                new_coords = new_coords_logit.sigmoid()  # Guaranteed in (0, 1)
+                
+                # Store normalized coords as reference_points for tracking
+                reference_points = new_coords.detach()
+                
+                # Convert back to logit space for next layer's recurrent connection
+                geometry_queries = new_coords_logit
 
                 # Denormalize polyline coordinates for offset addition
-                coord = geometry_queries.clone()
+                # Use the normalized coordinates we just computed
+                coord = new_coords.clone()  # [bs, num_query, points_num, pts_dim] in [0, 1]
                 coord[..., 0] = coord[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
                 coord[..., 1] = coord[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
                 if self.pts_dim == 3:
@@ -136,11 +149,11 @@ class LaneSegNetDecoder(TransformerLayerSequence):
             if self.return_intermediate:
                 intermediate_content.append(content_embeddings) # [bs, num_query, embed_dims//2]
                 intermediate_geometry.append(geometry_embeddings) # [bs, num_query, embed_dims//2]
-                intermediate_coords.append(geometry_queries) # [bs, num_query, points_num, pts_dim]
+                intermediate_coords.append(new_coords) # [bs, num_query, points_num, pts_dim] - store normalized coords
                 intermediate_reference_points.append(reference_points)
                 
             # Set up the reused variables for the next layer
-            geometry_queries = inverse_sigmoid(geometry_queries)
+            # geometry_queries already in logit space from inverse_sigmoid above
             geometry_queries = geometry_queries.permute(1, 0, 2, 3) # [num_query, bs, points_num, pts_dim]
             content_embeddings = content_embeddings.permute(1, 0, 2) # [num_query, bs, embed_dims//2]
 

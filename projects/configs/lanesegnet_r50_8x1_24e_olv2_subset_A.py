@@ -296,6 +296,7 @@ log_config = dict(
 checkpoint_config = dict(interval=4, max_keep_ckpts=10)
 
 dist_params = dict(backend='nccl')
+find_unused_parameters = True  # Allow unused parameters in DDP
 log_level = 'INFO'
 work_dir = None
 load_from = None

@@ -34,7 +34,9 @@ class LaneSegNetTransformer(BaseModule):
         self.init_layers()
 
     def init_layers(self):
-        self.reference_points = nn.Linear(self.embed_dims, self.pts_dim)
+        # Note: reference_points are now derived from geometric_queries
+        # No additional learnable layer needed
+        pass
 
     def init_weights(self):
         for p in self.parameters():
@@ -43,7 +45,7 @@ class LaneSegNetTransformer(BaseModule):
         for m in self.modules():
             if isinstance(m, LaneAttention):
                 m.init_weights()
-        xavier_init(self.reference_points, distribution='uniform', bias=0.)
+        # No reference_points layer to initialize anymore
 
 
     @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'object_query_embed', 'prev_bev', 'bev_pos'))
@@ -66,18 +68,26 @@ class LaneSegNetTransformer(BaseModule):
         # Use the passed queries directly (they will be projected in the decoder)
         query_pos = positional_query.unsqueeze(0).expand(bs, -1, -1)
         content_queries = content_query.unsqueeze(0).expand(bs, -1, -1)
-        geometric_queries = geometric_query.unsqueeze(0).expand(bs, -1, -1, -1)
-        reference_points = self.reference_points(query_pos) # nn.Linear [bs, num_query, embed_dims] -> [bs, num_query, pts_dim]
+        geometric_queries_raw = geometric_query.unsqueeze(0).expand(bs, -1, -1, -1)  # [bs, num_query, points_num, pts_dim]
+        
+        # Initialize reference points from geometric queries for better spatial coverage
+        # The geometric queries contain the initial centerline guess
+        # Apply sigmoid to get normalized coordinates, then convert to logit space for decoder
+        reference_points_normalized = geometric_queries_raw.sigmoid()  # [bs, num_query, points_num, pts_dim] in [0, 1]
+        
+        # Convert to logit space for decoder (decoder expects logit space input)
+        # Clamp to avoid numerical issues with inverse_sigmoid
+        reference_points_clamped = reference_points_normalized.clamp(min=1e-6, max=1-1e-6)
+        geometric_queries = inverse_sigmoid(reference_points_clamped)  # Convert to logit space
+        
+        # Store for return (in batch-first format)
+        init_reference_out = reference_points_normalized
+        
+        # Decoder expects reference_points in batch-first format (used for lane_ref_points indexing)
+        # Keep reference_points in batch-first: [bs, num_query, points_num, pts_dim]
+        reference_points = reference_points_normalized
 
-        # ident init: repeat reference points to num points
-        reference_points = reference_points.repeat(1, 1, self.points_num)
-        reference_points = reference_points.sigmoid()
-        bs, num_qeury, _ = reference_points.shape
-        reference_points = reference_points.view(bs, num_qeury, self.points_num, self.pts_dim)
-
-        init_reference_out = reference_points
-
-        # Switch num_query to the first dimension, batch to the second dimension
+        # Switch num_query to the first dimension for other inputs (standard transformer convention)
         content_queries = content_queries.permute(1, 0, 2) # [num_query, bs, embed_dims]
         query_pos = query_pos.permute(1, 0, 2) # [num_query, bs, embed_dims]
         geometric_queries = geometric_queries.permute(1, 0, 2, 3) # [num_query, bs, points_num, pts_dim]

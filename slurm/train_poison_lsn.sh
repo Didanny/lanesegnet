@@ -4,6 +4,8 @@
 #SBATCH -p opengpu.p
 #SBATCH -w poison 
 #SBATCH --gres=gpu:4
+#SBATCH --mem=64G
+#SBATCH -t 3-00:00:00
 #SBATCH -o slurm_logs/log_poison_lanesegnet.out
 #SBATCH -e slurm_logs/err_poison_lanesegnet.out
 

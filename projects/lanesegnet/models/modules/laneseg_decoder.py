@@ -91,33 +91,24 @@ class LaneSegNetDecoder(TransformerLayerSequence):
                 reg_center = reg_branches[0]
                 reg_offset = reg_branches[1]
 
-                # Project layer output to coordinate space to get residuals
+                # Project layer output to coordinate space to get residuals in logit space
+                # This matches the baseline approach: unbounded residuals in logit space
                 coord_residuals = reg_center[lid](geometry_duplicated) # [bs, num_query, points_num*pts_dim]
                 bs, num_query, _ = coord_residuals.shape
                 coord_residuals = coord_residuals.view(bs, num_query, -1, self.pts_dim) # [bs, num_query, points_num, pts_dim]
                 
-                # Scale residuals to encourage refinement rather than large jumps
-                # Using tanh squashing: limits updates to reasonable range per iteration
-                coord_residuals = torch.tanh(coord_residuals) * 0.2  # Max ±0.2 update per layer
-                
-                # Convert geometry_queries from logit space to normalized coordinates
+                # Work in logit space: add unbounded residuals directly to logit-space coordinates
+                # This allows large corrections in early layers, like the baseline
                 geometry_queries = geometry_queries.permute(1, 0, 2, 3) # [bs, num_query, points_num, pts_dim]
-                current_coords = geometry_queries.sigmoid() # [bs, num_query, points_num, pts_dim] in [0, 1]
+                new_coords_logit = coord_residuals + geometry_queries  # Direct addition in logit space
                 
-                # Apply residuals directly in normalized coordinate space
-                # This is the single, clear update mechanism
-                new_coords = current_coords + coord_residuals
-                
-                # Soft clamping: use sigmoid to smoothly bound coordinates
-                # This maintains gradients even for out-of-range predictions
-                new_coords_logit = inverse_sigmoid(new_coords.clamp(min=1e-6, max=1-1e-6))  # Prevent log(0)
-                new_coords_logit = new_coords_logit.clamp(min=-10, max=10)  # Prevent extreme logits
-                new_coords = new_coords_logit.sigmoid()  # Guaranteed in (0, 1)
+                # Convert to normalized space for use
+                new_coords = new_coords_logit.sigmoid()  # [bs, num_query, points_num, pts_dim] in (0, 1)
                 
                 # Store normalized coords as reference_points for tracking
                 reference_points = new_coords.detach()
                 
-                # Convert back to logit space for next layer's recurrent connection
+                # Keep in logit space for next layer's recurrent connection
                 geometry_queries = new_coords_logit
 
                 # Denormalize polyline coordinates for offset addition

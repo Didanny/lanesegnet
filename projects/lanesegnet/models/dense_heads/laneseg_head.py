@@ -208,7 +208,14 @@ class LaneSegHead(AnchorFreeHead):
         # Add specialized embeddings for content and geometry queries
         self.positional_query_embedding = nn.Embedding(self.num_query, self.embed_dims)
         self.content_query_embedding = nn.Embedding(self.num_query, self.embed_dims // 2)
-        self.geometry_query_embedding = nn.Embedding(self.num_query, self.num_points * self.pts_dim)
+        
+        # Learn geometry from positional queries (like baseline derives reference_points from query_pos)
+        # This matches baseline's paradigm: positional → geometric projection
+        self.geometry_projection = nn.Sequential(
+            nn.Linear(self.embed_dims, self.embed_dims),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims, self.num_points * self.pts_dim)
+        )
 
         cls_left_type_branch = []
         for _ in range(self.num_reg_fcs):
@@ -297,14 +304,15 @@ class LaneSegHead(AnchorFreeHead):
         # Initialize content queries (randomly initialized)
         content_queries = self.content_query_embedding.weight  # [num_query, embed_dims // 2]
         
-        # Initialize geometry queries (polyline guess)
-        geometry_queries = self.geometry_query_embedding.weight  # [num_query, num_points * point_dim]
-        geometry_queries = geometry_queries.view(self.num_query, -1, self.pts_dim) # [num_query, num_points, point_dim]
+        # Derive geometry from full positional queries (matching baseline: reference_points = Linear(query_pos))
+        # Positional embeddings establish spatial structure, which is fundamental to geometry
+        geometry_queries = self.geometry_projection(positional_queries)  # [num_query, num_points * pts_dim]
+        geometry_queries = geometry_queries.view(self.num_query, -1, self.pts_dim)  # [num_query, num_points, pts_dim]
         
         outputs = self.transformer(
             mlvl_feats,
             bev_feats,
-            positional_queries,  # Will be projected into the refernce points
+            positional_queries,  # Will be projected into the reference points
             content_queries,     # First half of the decoder query
             geometry_queries,    # Will be projected into second half of decoder query
             bev_h=self.bev_h,

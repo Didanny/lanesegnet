@@ -34,8 +34,8 @@ class LaneSegNetDecoder(TransformerLayerSequence):
                 geometry_queries=None,
                 reference_points=None,
                 reg_branches=None,
-                geo_pointwise_branches=None,
-                geo_global_branches=None,
+                geo_sequential_branches=None,
+                geo_final_branches=None,
                 key_padding_mask=None,
                 **kwargs):
         
@@ -56,10 +56,22 @@ class LaneSegNetDecoder(TransformerLayerSequence):
         content_embeddings = content_queries # [num_query, bs, embed_dims//2]
         
         for lid, layer in enumerate(self.layers):
-            # Project the geometry queries
-            pointwise_embeddings = geo_pointwise_branches[lid](geometry_queries) # [num_query, bs, points_num, embed_dims]
-            pointwise_embeddings = pointwise_embeddings.view(num_query, bs, -1) # [num_query, bs, points_num*embed_dims]
-            geometry_embeddings = geo_global_branches[lid](pointwise_embeddings) # [num_query, bs, embed_dims//2]
+            # Project the geometry queries using sequential 1D convolution
+            # Input shape: [num_query, bs, points_num, pts_dim]
+            # Need to reshape for Conv1d: [num_query*bs, pts_dim, points_num]
+            geom_reshaped = geometry_queries.view(num_query * bs, -1, self.pts_dim)  # [num_query*bs, points_num, pts_dim]
+            geom_reshaped = geom_reshaped.permute(0, 2, 1)  # [num_query*bs, pts_dim, points_num]
+            
+            # Apply sigmoid to get normalized coordinates, then process
+            geom_normalized = geom_reshaped.sigmoid()
+            
+            # Sequential convolution: respects polyline ordering and smoothness
+            geom_features = geo_sequential_branches[lid](geom_normalized)  # [num_query*bs, 256, 1] after pooling
+            geom_features = geom_features.squeeze(-1)  # [num_query*bs, 256]
+            
+            # Final projection to geometry embedding dimension
+            geometry_embeddings = geo_final_branches[lid](geom_features)  # [num_query*bs, embed_dims//2]
+            geometry_embeddings = geometry_embeddings.view(num_query, bs, -1)  # [num_query, bs, embed_dims//2]
             
             # Combine all queries: [content, geometry] -> [embed_dims]
             output = torch.cat([content_embeddings, geometry_embeddings], dim=-1)  # [num_query, bs, embed_dims]

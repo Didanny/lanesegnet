@@ -59,8 +59,8 @@ class LaneSegNetTransformer(BaseModule):
                 bev_w,
                 reg_branches=None,
                 cls_branches=None,
-                geo_pointwise_branches=None,
-                geo_global_branches=None,
+                geo_sequential_branches=None,
+                geo_final_branches=None,
                 **kwargs):
 
         bs = mlvl_feats[0].size(0)
@@ -103,8 +103,8 @@ class LaneSegNetTransformer(BaseModule):
             reference_points=reference_points,
             reg_branches=reg_branches,
             cls_branches=cls_branches,
-            geo_pointwise_branches=geo_pointwise_branches,
-            geo_global_branches=geo_global_branches,
+            geo_sequential_branches=geo_sequential_branches,
+            geo_final_branches=geo_final_branches,
             spatial_shapes=torch.tensor([[bev_h, bev_w]], device=content_queries.device),
             level_start_index=torch.tensor([0], device=content_queries.device),
             **kwargs)

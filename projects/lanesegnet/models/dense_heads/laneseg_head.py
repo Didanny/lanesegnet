@@ -177,30 +177,42 @@ class LaneSegHead(AnchorFreeHead):
         reg_branch_offset.append(Linear(self.embed_dims, self.code_size // 3))
         reg_branch_offset = nn.Sequential(*reg_branch_offset)
         
-        # Improved pointwise projection: deeper with normalization and better capacity
-        # Projects each 3D point independently but with more expressiveness
-        geometric_pointwise_projection_branch = []
-        geometric_pointwise_projection_branch.append(Linear(self.pts_dim, self.embed_dims))
-        geometric_pointwise_projection_branch.append(nn.LayerNorm(self.embed_dims))
-        geometric_pointwise_projection_branch.append(nn.ReLU(inplace=True))
-        geometric_pointwise_projection_branch.append(Linear(self.embed_dims, self.embed_dims))
-        geometric_pointwise_projection_branch.append(nn.LayerNorm(self.embed_dims))
-        geometric_pointwise_projection_branch.append(nn.ReLU(inplace=True))
-        geometric_pointwise_projection_branch.append(Linear(self.embed_dims, self.embed_dims))
-        geometric_pointwise_projection = nn.Sequential(*geometric_pointwise_projection_branch)
+        # Sequential geometric processor: respects polyline structure with 1D convolutions
+        # Input: [batch, pts_dim=3, num_points=10] treating polyline as a 3-channel sequence
+        # This captures local smoothness and global shape while preserving point ordering
+        geometric_sequential_encoder = []
         
-        # Improved global projection: less aggressive bottleneck, more capacity
-        # Aggregates information from all points with better information preservation
-        geometric_global_projection_branch = []
-        # First stage: compress to 2x embed_dims (less aggressive than 1x)
-        geometric_global_projection_branch.append(Linear(self.num_points * self.embed_dims, self.embed_dims * 2))
-        geometric_global_projection_branch.append(nn.LayerNorm(self.embed_dims * 2))
-        geometric_global_projection_branch.append(nn.ReLU(inplace=True))
-        geometric_global_projection_branch.append(nn.Dropout(0.1))  # Regularization
-        # Second stage: compress to final size
-        geometric_global_projection_branch.append(Linear(self.embed_dims * 2, self.embed_dims // 2))
-        geometric_global_projection_branch.append(nn.LayerNorm(self.embed_dims // 2))
-        geometric_global_projection = nn.Sequential(*geometric_global_projection_branch)
+        # Stage 1: Local feature extraction (kernel=3 sees immediate neighbors)
+        geometric_sequential_encoder.append(nn.Conv1d(self.pts_dim, 64, kernel_size=3, padding=1, bias=False))
+        geometric_sequential_encoder.append(nn.BatchNorm1d(64))
+        geometric_sequential_encoder.append(nn.ReLU(inplace=True))
+        
+        # Stage 2: Broader context (kernel=3 on 64 channels, sees 5-point receptive field)
+        geometric_sequential_encoder.append(nn.Conv1d(64, 128, kernel_size=3, padding=1, bias=False))
+        geometric_sequential_encoder.append(nn.BatchNorm1d(128))
+        geometric_sequential_encoder.append(nn.ReLU(inplace=True))
+        
+        # Stage 3: Global shape features (kernel=5 for even broader context)
+        geometric_sequential_encoder.append(nn.Conv1d(128, 256, kernel_size=5, padding=2, bias=False))
+        geometric_sequential_encoder.append(nn.BatchNorm1d(256))
+        geometric_sequential_encoder.append(nn.ReLU(inplace=True))
+        
+        # Stage 4: Refinement layer (kernel=3 for final smoothing)
+        geometric_sequential_encoder.append(nn.Conv1d(256, 256, kernel_size=3, padding=1, bias=False))
+        geometric_sequential_encoder.append(nn.BatchNorm1d(256))
+        geometric_sequential_encoder.append(nn.ReLU(inplace=True))
+        
+        # Global pooling: aggregate entire polyline into single feature vector
+        geometric_sequential_encoder.append(nn.AdaptiveAvgPool1d(1))
+        
+        geometric_sequential_projection = nn.Sequential(*geometric_sequential_encoder)
+        
+        # Final projection to geometry embedding dimension
+        geometric_final_projection = nn.Sequential(
+            nn.Linear(256, self.embed_dims // 2),
+            nn.LayerNorm(self.embed_dims // 2),
+            nn.Dropout(0.1)
+        )
 
         def _get_clones(module, N):
             return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
@@ -245,8 +257,8 @@ class LaneSegHead(AnchorFreeHead):
             self.cls_branches = _get_clones(fc_cls, num_pred)
             self.reg_branches = _get_clones(reg_branch, num_pred)
             self.reg_branches_offset = _get_clones(reg_branch_offset, num_pred)
-            self.geometric_pointwise_projection_branches = _get_clones(geometric_pointwise_projection, num_pred)
-            self.geometric_global_projection_branches = _get_clones(geometric_global_projection, num_pred)
+            self.geometric_sequential_projection_branches = _get_clones(geometric_sequential_projection, num_pred)
+            self.geometric_final_projection_branches = _get_clones(geometric_final_projection, num_pred)
             self.cls_left_type_branches = _get_clones(fc_cls_left_type, num_pred)
             self.cls_right_type_branches = _get_clones(fc_cls_right_type, num_pred)
             self.mask_embed = _get_clones(mask_branch, num_pred)
@@ -257,10 +269,10 @@ class LaneSegHead(AnchorFreeHead):
                 [reg_branch for _ in range(num_pred)])
             self.reg_branches_offset = nn.ModuleList(
                 [reg_branch_offset for _ in range(num_pred)])
-            self.geometric_pointwise_projection_branches = nn.ModuleList(
-                [geometric_pointwise_projection for _ in range(num_pred)])
-            self.geometric_global_projection_branches = nn.ModuleList(
-                [geometric_global_projection for _ in range(num_pred)])
+            self.geometric_sequential_projection_branches = nn.ModuleList(
+                [geometric_sequential_projection for _ in range(num_pred)])
+            self.geometric_final_projection_branches = nn.ModuleList(
+                [geometric_final_projection for _ in range(num_pred)])
             self.cls_left_type_branches = nn.ModuleList(
                 [fc_cls_left_type for _ in range(num_pred)])
             self.cls_right_type_branches = nn.ModuleList(
@@ -318,8 +330,8 @@ class LaneSegHead(AnchorFreeHead):
             bev_h=self.bev_h,
             bev_w=self.bev_w,
             reg_branches=(self.reg_branches, self.reg_branches_offset),  # noqa:E501
-            geo_pointwise_branches=self.geometric_pointwise_projection_branches,
-            geo_global_branches=self.geometric_global_projection_branches,
+            geo_sequential_branches=self.geometric_sequential_projection_branches,
+            geo_final_branches=self.geometric_final_projection_branches,
             cls_branches=None,
             img_metas=img_metas
         )

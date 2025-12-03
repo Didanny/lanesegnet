@@ -119,6 +119,7 @@ model = dict(
         bev_w=bev_w_,
         pc_range=point_cloud_range,
         pts_dim=pts_dim,
+        num_points=method_para['n_points'],
         sync_cls_avg_factor=False,
         with_box_refine=True,
         code_size=code_size,

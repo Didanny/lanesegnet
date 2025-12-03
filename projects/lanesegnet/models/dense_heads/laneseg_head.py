@@ -40,6 +40,7 @@ class LaneSegHead(AnchorFreeHead):
                  bev_w=30,
                  pc_range=None,
                  pts_dim=3,
+                 num_points=10,
                  sync_cls_avg_factor=False,
                  num_lane_type_classes=3,
                  loss_cls=dict(
@@ -124,6 +125,8 @@ class LaneSegHead(AnchorFreeHead):
         assert pts_dim in (2, 3)
         self.pts_dim = pts_dim
 
+        self.num_points = num_points
+
         self.with_box_refine = with_box_refine
         if with_shared_param is not None:
             self.with_shared_param = with_shared_param
@@ -178,6 +181,7 @@ class LaneSegHead(AnchorFreeHead):
             return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
         self.query_embedding = nn.Embedding(self.num_query, self.embed_dims * 2)
+        self.polyline_priors = nn.Embedding(self.num_query, self.num_points * self.pts_dim)
 
         cls_left_type_branch = []
         for _ in range(self.num_reg_fcs):
@@ -254,6 +258,10 @@ class LaneSegHead(AnchorFreeHead):
         """
         dtype = mlvl_feats[0].dtype
         object_query_embeds = self.query_embedding.weight.to(dtype)
+        
+        polyline_priors = self.polyline_priors.weight  # [num_query, num_points * point_dim]
+        polyline_priors = polyline_priors.view(self.num_query, -1, self.pts_dim) # [num_query, num_points, point_dim]
+        
         outputs = self.transformer(
             mlvl_feats,
             bev_feats,
@@ -267,52 +275,6 @@ class LaneSegHead(AnchorFreeHead):
         
         hs, init_reference, inter_references = outputs
         hs = hs.permute(0, 2, 1, 3)
-
-        if not self.training:
-            reference = inter_references[-1]
-            reference = inverse_sigmoid(reference)
-            assert reference.shape[-1] == self.pts_dim
-
-            outputs_class = self.cls_branches[-1](hs[-1])
-            output_left_type = self.cls_left_type_branches[-1](hs[-1])
-            output_right_type = self.cls_right_type_branches[-1](hs[-1])
-
-            tmp = self.reg_branches[-1](hs[-1])
-            bs, num_query, _ = tmp.shape
-            tmp = tmp.view(bs, num_query, -1, self.pts_dim)
-            tmp = tmp + reference
-            tmp = tmp.sigmoid()
-
-            coord = tmp.clone()
-            coord[..., 0] = coord[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
-            coord[..., 1] = coord[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
-            if self.pts_dim == 3:
-                coord[..., 2] = coord[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
-            centerline = coord.view(bs, num_query, -1).contiguous()
-
-            offset = self.reg_branches_offset[-1](hs[-1])
-            left_laneline = centerline + offset
-            right_laneline = centerline - offset
-
-            # segmentation head
-            if self.pred_mask:
-                outputs_mask = self._forward_mask_head(hs[-1], bev_feats, -1)
-
-            outputs_classes = torch.stack([outputs_class])
-            outputs_coords = torch.stack([torch.cat([centerline, left_laneline, right_laneline], axis=-1)])
-            output_left_types = torch.stack([output_left_type])
-            output_right_types = torch.stack([output_right_type])
-
-            outs = {
-                'all_cls_scores': outputs_classes,
-                'all_lanes_preds': outputs_coords,
-                'all_mask_preds': torch.stack([outputs_mask]) if self.pred_mask else None,
-                'all_lanes_left_type': output_left_types,
-                'all_lanes_right_type': output_right_types,
-                'history_states': hs
-            }
-
-            return outs
 
         outputs_classes = []
         outputs_coord = []
@@ -335,15 +297,19 @@ class LaneSegHead(AnchorFreeHead):
             bs, num_query, _ = tmp.shape
             tmp = tmp.view(bs, num_query, -1, self.pts_dim)
             tmp = tmp + reference
-            tmp = tmp.sigmoid()
-
-            coord = tmp.clone()
-            coord[..., 0] = coord[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
-            coord[..., 1] = coord[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
+            
+            coords = polyline_priors + tmp
+            polyline_priors = coords.detach().clone()
+            coords = coords.sigmoid()
+            
+            # Clone before denormalizing to avoid in-place modification of graph
+            coords = coords.clone()
+            coords[..., 0] = coords[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
+            coords[..., 1] = coords[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
             if self.pts_dim == 3:
-                coord[..., 2] = coord[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
-            centerline = coord.view(bs, num_query, -1).contiguous()
-
+                coords[..., 2] = coords[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
+                
+            centerline = coords.view(bs, num_query, -1).contiguous()
             offset = self.reg_branches_offset[lvl](hs[lvl])
             left_laneline = centerline + offset
             right_laneline = centerline - offset

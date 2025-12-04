@@ -5,5 +5,5 @@
 #SBATCH --mem=64G
 #SBATCH -t 1-00:00:00
 
-git checkout dev-alternative-refinement
+git checkout main
 git stash apply

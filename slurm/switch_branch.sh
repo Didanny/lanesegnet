@@ -6,4 +6,3 @@
 #SBATCH -t 1-00:00:00
 
 git checkout main
-git stash apply

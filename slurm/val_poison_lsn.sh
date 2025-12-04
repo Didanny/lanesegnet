@@ -8,6 +8,6 @@
 #SBATCH -e slurm_logs/err_poison_lanesegnet.out
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
-./tools/dist_test.sh 4 work_dirs/lanesegnet_2025-11-26_07-12-52 epoch_4
-./tools/dist_test.sh 4 work_dirs/lanesegnet_2025-11-26_07-12-52 epoch_8
-./tools/dist_test.sh 4 work_dirs/lanesegnet_2025-11-26_07-12-52 epoch_12
+./tools/dist_test.sh 4 work_dirs/lanesegnet_2025-12-03_00-53-49 epoch_4
+./tools/dist_test.sh 4 work_dirs/lanesegnet_2025-12-03_00-53-49 epoch_8
+./tools/dist_test.sh 4 work_dirs/lanesegnet_2025-12-03_00-53-49 epoch_12

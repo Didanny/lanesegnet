@@ -33,7 +33,7 @@ class LaneSegNetTransformer(BaseModule):
         self.init_layers()
 
     def init_layers(self):
-        self.reference_points = nn.Linear(self.embed_dims, self.pts_dim)
+        pass  # reference_points now come from polyline_priors in head
 
     def init_weights(self):
         for p in self.parameters():
@@ -42,7 +42,6 @@ class LaneSegNetTransformer(BaseModule):
         for m in self.modules():
             if isinstance(m, LaneAttention):
                 m.init_weights()
-        xavier_init(self.reference_points, distribution='uniform', bias=0.)
 
 
     @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'object_query_embed', 'prev_bev', 'bev_pos'))
@@ -52,6 +51,7 @@ class LaneSegNetTransformer(BaseModule):
                 object_query_embed,
                 bev_h,
                 bev_w,
+                polyline_priors=None,
                 reg_branches=None,
                 cls_branches=None,
                 **kwargs):
@@ -61,13 +61,11 @@ class LaneSegNetTransformer(BaseModule):
             object_query_embed, self.embed_dims, dim=1)
         query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
         query = query.unsqueeze(0).expand(bs, -1, -1)
-        reference_points = self.reference_points(query_pos)
-
-        # ident init: repeat reference points to num points
-        reference_points = reference_points.repeat(1, 1, self.points_num)
-        reference_points = reference_points.sigmoid()
-        bs, num_qeury, _ = reference_points.shape
-        reference_points = reference_points.view(bs, num_qeury, self.points_num, self.pts_dim)
+        
+        # polyline_priors: [num_query, num_points, pts_dim] in logit space
+        assert polyline_priors is not None, "polyline_priors must be provided"
+        reference_points = polyline_priors.unsqueeze(0).expand(bs, -1, -1, -1)
+        reference_points = reference_points.sigmoid()  # Convert to [0,1]
 
         init_reference_out = reference_points
 

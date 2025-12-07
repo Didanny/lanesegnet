@@ -134,5 +134,6 @@ ckpts
 data
 work_dirs
 .vscode
+*.pt
 slurm_logs/
 playground/

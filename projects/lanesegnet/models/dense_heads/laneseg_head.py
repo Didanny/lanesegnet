@@ -261,7 +261,7 @@ class LaneSegHead(AnchorFreeHead):
         object_query_embeds = self.query_embedding.weight.to(dtype)
         
         polyline_priors = self.polyline_priors.weight  # [num_query, num_points * point_dim]
-        polyline_priors = polyline_priors.view(self.num_query, -1, self.pts_dim) # [num_query, num_points, point_dim]
+        polyline_priors = polyline_priors.view(self.num_query, self.num_points, self.pts_dim) # [num_query, num_points, point_dim]
         
         outputs = self.transformer(
             mlvl_feats,
@@ -269,6 +269,7 @@ class LaneSegHead(AnchorFreeHead):
             object_query_embeds,
             bev_h=self.bev_h,
             bev_w=self.bev_w,
+            polyline_priors=polyline_priors,
             reg_branches=(self.reg_branches, self.reg_branches_offset) if self.with_box_refine else None,  # noqa:E501
             cls_branches=None,
             img_metas=img_metas
@@ -298,13 +299,10 @@ class LaneSegHead(AnchorFreeHead):
             bs, num_query, _ = tmp.shape
             tmp = tmp.view(bs, num_query, -1, self.pts_dim)
             tmp = tmp + reference
+            tmp = tmp.sigmoid()
             
-            coords = polyline_priors + tmp
-            polyline_priors = coords.detach().clone()
-            coords = coords.sigmoid()
-            
-            # Clone before denormalizing to avoid in-place modification of graph
-            coords = coords.clone()
+            # Denormalize to real-world coordinates
+            coords = tmp.clone()
             coords[..., 0] = coords[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
             coords[..., 1] = coords[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
             if self.pts_dim == 3:

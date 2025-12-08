@@ -271,6 +271,7 @@ optimizer = dict(
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
+            'lane_head.polyline_priors': dict(lr_mult=5.0),  # 5x higher LR for polyline priors
         }),
     weight_decay=0.01)
 

@@ -182,7 +182,7 @@ class LaneSegHead(AnchorFreeHead):
 
         self.query_embedding = nn.Embedding(self.num_query, self.embed_dims * 2)
         self.polyline_priors = nn.Embedding(self.num_query, self.num_points * self.pts_dim)
-        nn.init.uniform_(self.polyline_priors.weight, -2.0, 2.0)
+        nn.init.normal_(self.polyline_priors.weight, mean=0.0, std=0.3)
 
         cls_left_type_branch = []
         for _ in range(self.num_reg_fcs):
